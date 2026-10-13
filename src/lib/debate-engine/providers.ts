@@ -8,6 +8,7 @@
 // ============================================================
 
 const API_KEYS = {
+  groq: process.env.GROQ_API_KEY || '',
   tavily: process.env.TAVILY_API_KEY || '',
   cloudflare: process.env.CLOUDFLARE_API_KEY || '',
   cerebras: process.env.CEREBRAS_API_KEY || '',
