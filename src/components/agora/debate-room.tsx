@@ -1391,18 +1391,25 @@ export function DebateRoom() {
   // Keep ref in sync
   useEffect(() => { handleEventRef.current = handleDebateEvent; }, [handleDebateEvent]);
 
-  // Polling refs
+  // Streaming & polling refs
+  const streamAbortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastEventIdRef = useRef(0);
   const cancelledRef = useRef(false);
 
-  // Start debate — uses SHORT POLLING (no long-running connections)
-  // POST to start (returns immediately) → poll GET every 1.5s for updates
+  // Start debate — uses real-time SSE streaming for instant updates with zero session expiration
   const startDebate = useCallback(async () => {
     if (!topic.trim() || topic.trim().length < 10) return;
 
-    // Cancel any previous polling
-    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+    // Cancel any previous stream or polling
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
+    }
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     cancelledRef.current = false;
 
     // Reset state
@@ -1421,88 +1428,139 @@ export function DebateRoom() {
     setPhase('active');
     lastEventIdRef.current = 0;
 
-    // Step 1: POST to start the debate — this returns in < 100ms
-    let debateId = '';
+    const abortCtrl = new AbortController();
+    streamAbortRef.current = abortCtrl;
+
     try {
-      const res = await fetch('/api/debate/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: topic.trim(),
-          context: context.trim() || undefined,
-          maxRounds,
-        }),
+      // Step 1: Connect to direct SSE stream (works seamlessly on Vercel & localhost)
+      const streamUrl = `/api/debate/stream?topic=${encodeURIComponent(topic.trim())}&maxRounds=${maxRounds}${context.trim() ? `&context=${encodeURIComponent(context.trim())}` : ''}`;
+      const res = await fetch(streamUrl, {
+        signal: abortCtrl.signal,
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setError(err.error || `Server error (${res.status})`);
-        setPhase('form');
-        return;
+        throw new Error(`Server returned ${res.status}`);
       }
 
-      const data = await res.json();
-      debateId = data.debateId;
-      console.log('[DEBATE] Started debate:', debateId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Network error';
-      console.error('[DEBATE] Start failed:', msg);
-      setError('Could not start debate — please check your connection and try again.');
-      setPhase('form');
-      return;
-    }
+      if (!res.body) {
+        throw new Error('No stream body received');
+      }
 
-    // Step 2: Poll for updates every 1.5 seconds
-    const poll = async () => {
-      if (cancelledRef.current) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = 'message';
 
-      try {
-        const res = await fetch(`/api/debate/poll?id=${debateId}&after=${lastEventIdRef.current}`);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done || cancelledRef.current) break;
 
-        if (!res.ok) {
-          // Debate might have expired — stop polling
-          if (res.status === 404) {
-            if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
-            if (phase !== 'completed') {
-              setError('Debate session expired. Please start a new debate.');
-              setPhase('form');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) {
+            // Keepalive ping or heartbeat
+            continue;
+          }
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.slice(6).trim();
+          } else if (trimmed.startsWith('data:')) {
+            const dataStr = trimmed.slice(5).trim();
+            if (dataStr) {
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.debateId) {
+                  setDebateId(parsed.debateId);
+                }
+                handleEventRef.current(currentEvent, parsed);
+              } catch (parseErr) {
+                console.warn('[DEBATE] SSE JSON parse warning:', parseErr);
+              }
             }
           }
-          return;
         }
-
-        const data = await res.json();
-
-        // Process each new event
-        for (const evt of data.events) {
-          lastEventIdRef.current = evt.id;
-          try {
-            handleEventRef.current(evt.event, evt.data);
-          } catch (e) {
-            console.error('[DEBATE] Event handling error:', e);
-          }
-        }
-
-        // Stop polling when debate is done
-        if (data.complete) {
-          if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
-        }
-      } catch (err) {
-        // Individual poll failure — just skip, next poll will retry
-        console.warn('[DEBATE] Poll failed, will retry on next interval');
       }
-    };
+    } catch (err) {
+      if (cancelledRef.current || abortCtrl.signal.aborted) return;
+      console.warn('[DEBATE] SSE stream interrupted; attempting fallback start:', err);
 
-    // Start polling immediately, then every 1.5 seconds
-    poll(); // First poll immediately
-    pollTimerRef.current = setInterval(poll, 1500);
-  }, [topic, context, maxRounds, addLog, phase]);
+      // Fallback: Start debate via background job with retry polling
+      try {
+        const fallbackRes = await fetch('/api/debate/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: topic.trim(),
+            context: context.trim() || undefined,
+            maxRounds,
+          }),
+        });
 
-  // Cleanup polling on unmount
+        if (!fallbackRes.ok) {
+          const errData = await fallbackRes.json().catch(() => ({}));
+          throw new Error(errData.error || `Server error (${fallbackRes.status})`);
+        }
+
+        const data = await fallbackRes.json();
+        const activeDebateId = data.debateId;
+        setDebateId(activeDebateId);
+
+        let notFoundRetries = 0;
+        const poll = async () => {
+          if (cancelledRef.current) return;
+          try {
+            const pollRes = await fetch(`/api/debate/poll?id=${activeDebateId}&after=${lastEventIdRef.current}`);
+            if (!pollRes.ok) {
+              if (pollRes.status === 404) {
+                notFoundRetries++;
+                if (notFoundRetries > 8) {
+                  if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+                  setError('Debate connection timed out. Please try again.');
+                  setPhase('form');
+                }
+              }
+              return;
+            }
+            notFoundRetries = 0;
+            const pollData = await pollRes.json();
+            for (const evt of pollData.events || []) {
+              lastEventIdRef.current = evt.id;
+              try { handleEventRef.current(evt.event, evt.data); } catch {}
+            }
+            if (pollData.complete) {
+              if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+            }
+          } catch {}
+        };
+        poll();
+        pollTimerRef.current = setInterval(poll, 1500);
+      } catch (fallbackErr) {
+        const msg = fallbackErr instanceof Error ? fallbackErr.message : 'Connection error';
+        setError(`Unable to start debate: ${msg}`);
+        setPhase('form');
+      }
+    } finally {
+      if (streamAbortRef.current === abortCtrl) {
+        streamAbortRef.current = null;
+      }
+    }
+  }, [topic, context, maxRounds]);
+
+  // Cleanup stream and polling on unmount
   useEffect(() => {
     return () => {
       cancelledRef.current = true;
-      if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+      if (streamAbortRef.current) {
+        streamAbortRef.current.abort();
+        streamAbortRef.current = null;
+      }
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -1520,6 +1578,7 @@ export function DebateRoom() {
   // Reset
   const resetDebate = useCallback(() => {
     cancelledRef.current = true;
+    if (streamAbortRef.current) { streamAbortRef.current.abort(); streamAbortRef.current = null; }
     if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
     setPhase('form');
     setDebateId('');

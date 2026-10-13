@@ -39,8 +39,8 @@ export async function GET(request: NextRequest) {
   const result = getEventsSince(id, afterId);
 
   if (result.status === 'not_found') {
-    return Response.json({ error: 'Debate not found', events: [], complete: true }, {
-      status: 404,
+    return Response.json({ error: 'Debate not found yet', events: [], complete: false }, {
+      status: 200,
       headers: corsHeaders(),
     });
   }
