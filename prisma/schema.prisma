@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Debate {
+  id          String    @id @default(cuid())
+  topic       String
+  context     String?
+  status      String    @default("draft") // draft, active, completed, archived
+  mode        String    @default("ai-vs-ai") // ai-vs-ai, ai-vs-human, human-vs-human
+  maxRounds   Int       @default(5)
+  currentRound Int      @default(0)
+  userId      String?   // optional link to user
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  arguments   Argument[]
+  scores      DebateScore[]
+  fallacies   FallacyReport[]
+  coaching    CoachingReport[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model Argument {
+  id          String   @id @default(cuid())
+  debateId    String
+  debate      Debate   @relation(fields: [debateId], references: [id], onDelete: Cascade)
+  round       Int
+  side        String   // affirmative, negative
+  agentRole   String   // strategist, researcher, advocate, critic, judge
+  content     String
+  metadata    String?  // JSON: sources, confidence, strategy notes
+  createdAt   DateTime @default(now())
+
+  @@index([debateId, round])
+  @@index([side])
+}
+
+model DebateScore {
+  id          String   @id @default(cuid())
+  debateId    String
+  debate      Debate   @relation(fields: [debateId], references: [id], onDelete: Cascade)
+  round       Int
+  side        String
+  agentRole   String   // which agent scored this
+  scores      String   // JSON: { accuracy, completeness, clarity, depth, directness, overall }
+  breakdown   String?  // JSON: detailed scoring breakdown
+  createdAt   DateTime @default(now())
+
+  @@index([debateId])
+}
+
+model FallacyReport {
+  id          String   @id @default(cuid())
+  debateId    String
+  debate      Debate   @relation(fields: [debateId], references: [id], onDelete: Cascade)
+  argumentId  String?
+  round       Int
+  side        String
+  fallacyType String
+  description String
+  severity    String   @default("medium") // low, medium, high, critical
+  createdAt   DateTime @default(now())
+
+  @@index([debateId])
+  @@index([fallacyType])
+}
+
+model CoachingReport {
+  id          String   @id @default(cuid())
+  debateId    String
+  debate      Debate   @relation(fields: [debateId], references: [id], onDelete: Cascade)
+  side        String
+  strengths   String   // JSON: array of strength descriptions
+  weaknesses  String   // JSON: array of weakness descriptions
+  improvements String?  // JSON: array of improvement suggestions
+  overallGrade String?  // A+, A, A-, B+, B, etc.
+  createdAt   DateTime @default(now())
+
+  @@index([debateId])
+}
+
+model AgentRun {
+  id          String   @id @default(cuid())
+  debateId    String?
+  agentRole   String
+  input       String   // JSON: input data for the agent
+  output      String?  // JSON: output from the agent
+  model       String?
+  durationMs  Int?
+  tokensUsed  Int?
+  status      String   @default("pending") // pending, running, completed, failed, error
+  error       String?
+  createdAt   DateTime @default(now())
+
+  @@index([agentRole])
+  @@index([status])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  debateId    String?
+  action      String
+  actor       String   // agent role or "system" or "user"
+  details     String?  // JSON
+  createdAt   DateTime @default(now())
+
+  @@index([debateId])
+  @@index([createdAt])
+}
+
+// ══════════════════════════════════════════════════════════════
+// USER & NOTIFICATION SYSTEM
+// ══════════════════════════════════════════════════════════════
+
+model User {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  name          String?
+  avatar        String?
+  lastLoginAt   DateTime?
+  loginCount    Int           @default(0)
+  isActive      Boolean       @default(true)
+  preferences   String?       // JSON: { emailNotifications: true, reminderFrequency: 'daily' }
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  notifications Notification[]
+  schedules     ScheduledNotification[]
+
+  @@index([email])
+  @@index([isActive])
+}
+
+model Notification {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String   // login_alert, reminder, system, debate_complete, scheduled
+  title       String
+  message     String
+  isRead      Boolean  @default(false)
+  metadata    String?  // JSON: additional data
+  sentVia     String?  // in_app, email, both
+  createdAt   DateTime @default(now())
+  readAt      DateTime?
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model ScheduledNotification {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  message     String
+  scheduledAt DateTime
+  sentAt      DateTime?
+  status      String   @default("pending") // pending, sent, failed, cancelled
+  repeatRule  String?  // JSON: { type: 'daily'|'weekly'|'custom', intervalMinutes?: number, daysOfWeek?: number[] }
+  metadata    String?  // JSON
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+// ══════════════════════════════════════════════════════════════
+// DEBATE HISTORY
+// ══════════════════════════════════════════════════════════════
+
+model DebateHistory {
+  id          String   @id @default(cuid())
+  userId      String?
+  topic       String
+  summary     String
+  verdict     String
+  winner      String
+  affScore    Float
+  negScore    Float
+  affGrade    String
+  negGrade    String
+  rounds      Int
+  durationMs  Int
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
