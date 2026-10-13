@@ -62,3 +62,4 @@ db/*.bak
 _fix.js
 _dbcheck.js
 tool-results/
+.vercel

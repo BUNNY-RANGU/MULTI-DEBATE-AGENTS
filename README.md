@@ -4,6 +4,15 @@ An autonomous multi-agent debate platform powered by Next.js, Tailwind CSS, Pris
 
 ---
 
+## 🌐 Live Deployment & Links
+
+- **🚀 Production Deployment (Vercel):** [https://multi-debate-agents.vercel.app](https://multi-debate-agents.vercel.app)
+- **🔗 GitHub Repository:** [https://github.com/BUNNY-RANGU/MULTI-DEBATE-AGENTS](https://github.com/BUNNY-RANGU/MULTI-DEBATE-AGENTS)
+- **⚡ Live Tunnel (Cloudflare):** [https://gerald-chains-lows-mods.trycloudflare.com](https://gerald-chains-lows-mods.trycloudflare.com)
+- **💻 Local Instance:** [http://localhost:3001](http://localhost:3001)
+
+---
+
 ## 🚀 Features
 
 - **Multi-Agent Debates**: Configure AI agents with distinctive personas, debate styles, and argument structures.
